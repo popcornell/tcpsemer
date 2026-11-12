@@ -1,0 +1,5 @@
+[
+  {"session_id": "S1", "speaker": "A", "start_time": 0.0, "end_time": 2.0, "words": "hello how are you doing today"},
+  {"session_id": "S1", "speaker": "B", "start_time": 2.5, "end_time": 4.0, "words": "i am fine thank you"},
+  {"session_id": "S1", "speaker": "A", "start_time": 8.0, "end_time": 10.0, "words": "shall we start the meeting now"}
+]
