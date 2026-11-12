@@ -27,6 +27,7 @@ The corpus-level score is the sum of errors over the sum of reference words
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Union
 
@@ -161,21 +162,103 @@ class _Embedder:
             model = SentenceTransformer(model, device=device)
         self.model = model
         self.batch_size = batch_size
-        self.cache = {}
 
-    def add(self, sentences):
-        new = list(dict.fromkeys(s for s in sentences if s not in self.cache))
-        if new:
-            emb = self.model.encode(new, batch_size=self.batch_size,
-                                    convert_to_tensor=True,
-                                    show_progress_bar=False)
-            self.cache.update(zip(new, emb))
-
-    def distance(self, a: str, b: str) -> float:
+    def distances(self, pairs) -> List[float]:
+        """1 - cosine similarity for each (a, b) sentence pair."""
         import torch
-        sim = torch.nn.functional.cosine_similarity(
-            self.cache[a].unsqueeze(0), self.cache[b].unsqueeze(0)).item()
-        return 1.0 - sim
+        if not pairs:
+            return []
+        sents = list(dict.fromkeys(x for p in pairs for x in p))
+        idx = {x: i for i, x in enumerate(sents)}
+        emb = self.model.encode(sents, batch_size=self.batch_size,
+                                convert_to_tensor=True, show_progress_bar=False)
+        a = emb[[idx[x] for x, _ in pairs]]
+        b = emb[[idx[y] for _, y in pairs]]
+        sim = torch.nn.functional.cosine_similarity(a, b).tolist()
+        return [1.0 - x for x in sim]
+
+
+# A plan is (length, fixed_errors, utterances, unattached, missed):
+#   utterances: [(speaker, ref_text, hyp_text, n_ref, n_hyp, start, end)]
+#   unattached: [(speaker, hyp_text, n_words, start, end)]  insertions outside
+#               every utterance, cost 1 per word (included in fixed_errors)
+#   missed:     [(speaker, n_words)]  missed reference speakers (included in
+#               fixed_errors)
+# fixed_errors also includes the words of unassigned hypothesis speakers.
+
+def _plan_python(c_ref: SegLST, c_hyp: SegLST, collar: float, max_gap: float):
+    ref_spk = c_ref.groupby("speaker")
+    length = sum(_n_words(v) for v in ref_spk.values())
+    if len(c_hyp) == 0:
+        return (length, length, [], [],
+                [(spk, _n_words(segs)) for spk, segs in ref_spk.items()])
+
+    result = time_constrained_minimum_permutation_word_error_rate(
+        c_ref, c_hyp, collar=collar)
+    assign = {h: r for r, h in result.assignment if h is not None}
+    c_hyp = SegLST([{**s, "speaker": assign.get(s["speaker"]) or _UNASSIGNED}
+                    for s in c_hyp])
+    hyp_spk = c_hyp.groupby("speaker")
+
+    fixed = 0
+    for spk, segs in hyp_spk.items():
+        if spk not in ref_spk:
+            fixed += _n_words(segs)  # unassigned hypothesis speaker
+
+    utts, runs, missed = [], [], []
+    for spk, segs in ref_spk.items():
+        if spk not in hyp_spk:
+            n = _n_words(segs)
+            fixed += n
+            missed.append((spk, n))
+            continue
+        alignment = tc_align(segs, hyp_spk[spk], collar=collar, style="seglst")
+        spk_utts, unattached = _split_utterances(alignment, max_gap, collar)
+        for u in spk_utts:
+            r = [x for x, _ in u if x is not None]
+            h = [y for _, y in u if y is not None]
+            utts.append((spk, " ".join(x["words"] for x in r),
+                         " ".join(y["words"] for y in h), len(r), len(h),
+                         min(float(w["start_time"]) for w in r),
+                         max(float(w["end_time"]) for w in r)))
+        for run in unattached:
+            fixed += len(run)
+            runs.append((spk, " ".join(w["words"] for w in run), len(run),
+                         min(float(w["start_time"]) for w in run),
+                         max(float(w["end_time"]) for w in run)))
+    return length, fixed, utts, runs, missed
+
+
+def _rust_module():
+    try:
+        from . import _rust
+        return _rust
+    except ImportError:
+        return None
+
+
+def _plans(ref_by_sess, hyp_by_sess, collar, max_gap, backend):
+    if backend == "auto":
+        backend = os.environ.get("TCPSEMER_BACKEND", "auto")
+    rust = _rust_module() if backend in ("auto", "rust") else None
+    if backend == "rust" and rust is None:
+        raise ImportError("tcpsemer was installed without its Rust extension")
+    sessions = list(ref_by_sess)
+    if rust is None:
+        return {sess: _plan_python(ref_by_sess[sess],
+                                   hyp_by_sess.get(sess, SegLST([])),
+                                   collar, max_gap)
+                for sess in sessions}
+
+    def rows(sl):
+        return [(str(s["speaker"]), float(s["start_time"]),
+                 float(s["end_time"]), s["words"]) for s in sl]
+
+    plans = rust.plan_sessions(
+        [(rows(ref_by_sess[sess]), rows(hyp_by_sess.get(sess, SegLST([]))))
+         for sess in sessions],
+        float(collar), float(max_gap))
+    return dict(zip(sessions, plans))
 
 
 def tcpsemer(
@@ -191,6 +274,7 @@ def tcpsemer(
         batch_size: int = 64,
         max_gap: float = 2.0,
         return_segments: bool = False,
+        backend: str = "auto",
 ) -> Dict[str, SemERResult]:
     """Compute tcpSemER per session.
 
@@ -209,6 +293,9 @@ def tcpsemer(
         max_gap: a reference gap longer than this (seconds) starts a new
             utterance.
         return_segments: store per-utterance scores in ``result.segments``.
+        backend: ``"rust"``, ``"python"`` or ``"auto"`` (Rust if the
+            extension is available; the ``TCPSEMER_BACKEND`` environment
+            variable overrides ``"auto"``). Both give identical results.
 
     Returns:
         ``{session_id: SemERResult}``. Use :func:`combine` for the overall
@@ -223,92 +310,34 @@ def tcpsemer(
         logger.warning("Ignoring %d hypothesis session(s) without reference: %s",
                        len(extra), sorted(extra))
 
-    # Pass 1: alignments. Pass 2 (below): embeddings in one batched call.
-    plans = {}
-    for sess, c_ref in ref_by_sess.items():
-        c_hyp = hyp_by_sess.get(sess, SegLST([]))
-        ref_spk = c_ref.groupby("speaker")
-        length = sum(_n_words(v) for v in ref_spk.values())
-        fixed_errors = 0.0
-        utts = []  # (speaker, [(ref_word, hyp_word), ...])
-        inserted = []  # (speaker, [hyp_word, ...]) outside every utterance
+    plans = _plans(ref_by_sess, hyp_by_sess, collar, max_gap, backend)
 
-        if len(c_hyp) == 0:
-            plans[sess] = (length, float(length), [], [
-                (spk, _n_words(segs)) for spk, segs in ref_spk.items()], [])
-            continue
-
-        result = time_constrained_minimum_permutation_word_error_rate(
-            c_ref, c_hyp, collar=collar)
-        assign = {h: r for r, h in result.assignment if h is not None}
-        c_hyp = SegLST([{**s, "speaker": assign.get(s["speaker"]) or _UNASSIGNED}
-                        for s in c_hyp])
-        hyp_spk = c_hyp.groupby("speaker")
-
-        for spk, segs in hyp_spk.items():
-            if spk not in ref_spk:
-                fixed_errors += _n_words(segs)  # insertions
-
-        missed = []
-        for spk, segs in ref_spk.items():
-            if spk not in hyp_spk:
-                fixed_errors += _n_words(segs)  # deletions
-                missed.append((spk, _n_words(segs)))
-                continue
-            alignment = tc_align(segs, hyp_spk[spk], collar=collar, style="seglst")
-            spk_utts, unattached = _split_utterances(alignment, max_gap, collar)
-            for u in spk_utts:
-                utts.append((spk, u))
-            for run in unattached:
-                fixed_errors += len(run)  # insertions outside every utterance
-                inserted.append((spk, run))
-        plans[sess] = (length, fixed_errors, utts, missed, inserted)
-
-    embedder = None
-    pending = []
-    for _, _, utts, _, _ in plans.values():
-        for _, u in utts:
-            r = [x["words"] for x, _ in u if x is not None]
-            h = [y["words"] for _, y in u if y is not None]
-            if r and h:
-                pending += [" ".join(r), " ".join(h)]
-    if pending:
-        embedder = _Embedder(model, device=device, batch_size=batch_size)
-        embedder.add(pending)
+    pairs = [(u[1], u[2]) for p in plans.values() for u in p[2] if u[4] > 0]
+    dists = iter(_Embedder(model, device=device, batch_size=batch_size)
+                 .distances(pairs) if pairs else [])
 
     out = {}
-    for sess, (length, errors, utts, missed, inserted) in plans.items():
+    for sess, (length, fixed, utts, runs, missed) in plans.items():
+        errors = float(fixed)
         segments = [] if return_segments else None
-        for spk, u in utts:
-            r_words = [x for x, _ in u if x is not None]
-            h_words = [y for _, y in u if y is not None]
-            r = " ".join(x["words"] for x in r_words)
-            h = " ".join(y["words"] for y in h_words)
-            if r_words and not h_words:
-                dist, cost = 1.0, float(len(r_words))
-            elif h_words and not r_words:
-                dist, cost = 1.0, float(len(h_words))
+        for spk, r, h, n_ref, n_hyp, st, et in utts:
+            if n_hyp == 0:
+                dist, cost = 1.0, float(n_ref)
             else:
-                dist = embedder.distance(r, h)
-                cost = dist * len(r_words)
+                dist = next(dists)
+                cost = dist * n_ref
             errors += cost
             if return_segments:
-                times = [float(w["start_time"]) for w in r_words or h_words] + \
-                        [float(w["end_time"]) for w in r_words or h_words]
                 segments.append(SegmentScore(
-                    speaker=spk, start_time=min(times), end_time=max(times),
-                    reference=r, hypothesis=h, reference_words=len(r_words),
-                    distance=dist, errors=cost))
+                    speaker=spk, start_time=st, end_time=et, reference=r,
+                    hypothesis=h, reference_words=n_ref, distance=dist,
+                    errors=cost))
         if return_segments:
-            # Insertions outside every utterance (already counted in `errors`).
-            for spk, run in inserted:
+            for spk, h, n, st, et in runs:
                 segments.append(SegmentScore(
-                    speaker=spk,
-                    start_time=min(float(w["start_time"]) for w in run),
-                    end_time=max(float(w["end_time"]) for w in run),
-                    reference="", hypothesis=" ".join(w["words"] for w in run),
-                    reference_words=0, distance=1.0, errors=float(len(run))))
-            # Missed reference speakers (already counted in `errors`).
+                    speaker=spk, start_time=st, end_time=et, reference="",
+                    hypothesis=h, reference_words=0, distance=1.0,
+                    errors=float(n)))
             for spk, n in missed:
                 segments.append(SegmentScore(
                     speaker=spk, start_time=float("nan"), end_time=float("nan"),

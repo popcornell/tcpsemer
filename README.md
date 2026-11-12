@@ -17,6 +17,11 @@ pip install git+https://github.com/<org>/tcpSemER
 pip install -e .
 ```
 
+Installing from source compiles a Rust extension, so it needs a Rust
+toolchain (`curl https://sh.rustup.rs -sSf | sh`). Without the extension the
+package falls back to a pure-Python backend built on MeetEval, which gives
+identical results but is slower.
+
 ## Usage
 
 Inputs are anything `meeteval-wer` reads: SegLST JSON, STM, CTM. A SegLST file
@@ -43,6 +48,7 @@ Useful options:
 | `--uem`, `--regex` | restrict the scored region / sessions |
 | `--model` | sentence-transformers model (default `sentence-transformers/all-MiniLM-L6-v2`) |
 | `--max-gap` | reference gap in seconds that starts a new utterance (default 2) |
+| `--backend` | `rust`, `python` or `auto` (default) |
 | `--per-reco-out` | per-session results as JSON |
 | `--segments-out` | per-utterance distances as JSON lines |
 
@@ -89,10 +95,28 @@ The corpus score is the sum of costs over the sum of reference words
 A session that is missing from the hypothesis counts as all deletions.
 Hypothesis sessions with no reference are ignored, with a warning.
 
-## Speed
+## Implementation and speed
 
-Each distinct sentence is encoded once, in batches. DiPCo eval (5 sessions,
-about 29k reference words) takes about 5 s on a MacBook.
+Speaker assignment, time-constrained alignment and utterance grouping run in
+Rust (`src/`), one thread per session. The alignment is a port of MeetEval's
+`levenshtein.h` and the assignment a port of SciPy's
+`linear_sum_assignment`, including their tie-breaking, so the Rust and
+Python backends produce the same alignments and the same scores
+(`tests/test_rust_equivalence.py` checks the kernels against MeetEval and
+SciPy). Select a backend with `backend=` / `--backend` or the
+`TCPSEMER_BACKEND` environment variable.
+
+Alignment time on a MacBook, without loading and embeddings:
+
+| set | sessions | Python | Rust |
+|---|---|---|---|
+| AMI (DiCoW) | 16 | 1.66 s | 0.09 s |
+| NOTSOFAR-1 (DiCoW) | 160 | 3.17 s | 0.10 s |
+| NOTSOFAR-1 (Gemini 2.5 Pro) | 160 | 3.00 s | 0.04 s |
+
+The total run time is then dominated by the sentence embedding model
+(about 4 s for NOTSOFAR-1 eval on Apple MPS). Each distinct sentence is
+encoded once, in batches.
 
 ## Compatibility
 

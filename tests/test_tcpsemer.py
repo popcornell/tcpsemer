@@ -27,30 +27,46 @@ class FakeModel:
         return out
 
 
-def score(ref, hyp, **kw):
-    return tcpsemer(ref, hyp, model=FakeModel(), **kw)
+BACKENDS = ["python"]
+try:
+    from tcpsemer import _rust  # noqa: F401
+    BACKENDS.append("rust")
+except ImportError:
+    pass
 
 
-def test_perfect_hypothesis_with_renamed_speakers():
+@pytest.fixture(params=BACKENDS, autouse=True)
+def backend(request):
+    return request.param
+
+
+@pytest.fixture
+def score(backend):
+    def score(ref, hyp, **kw):
+        return tcpsemer(ref, hyp, model=FakeModel(), backend=backend, **kw)
+    return score
+
+
+def test_perfect_hypothesis_with_renamed_speakers(score):
     hyp = [{**s, "speaker": {"A": "x", "B": "y"}[s["speaker"]]} for s in REF]
     r = score(REF, hyp)["S1"]
     assert r.length == 17
     assert r.errors == pytest.approx(0.0, abs=1e-5)
 
 
-def test_missed_speaker_costs_all_its_words():
+def test_missed_speaker_costs_all_its_words(score):
     hyp = [s for s in REF if s["speaker"] == "A"]
     r = score(REF, hyp)["S1"]
     assert r.errors == pytest.approx(5.0, abs=1e-5)
 
 
-def test_extra_speaker_costs_all_its_words():
+def test_extra_speaker_costs_all_its_words(score):
     hyp = REF + [seg("S1", "C", 5.0, 6.0, "one two three")]
     r = score(REF, hyp)["S1"]
     assert r.errors == pytest.approx(3.0, abs=1e-5)
 
 
-def test_hypothesis_outside_collar_is_deletion_plus_insertion():
+def test_hypothesis_outside_collar_is_deletion_plus_insertion(score):
     # B's words shifted by 100 s: B's reference is deleted, the shifted words
     # are insertions, as in tcpWER.
     hyp = [REF[0], REF[2], seg("S1", "B", 102.5, 104.0, "i am fine thank you")]
@@ -59,7 +75,7 @@ def test_hypothesis_outside_collar_is_deletion_plus_insertion():
     assert sum(s.errors for s in r.segments) == pytest.approx(r.errors)
 
 
-def test_insertion_within_collar_joins_utterance():
+def test_insertion_within_collar_joins_utterance(score):
     # "really" is inserted 3 s after the utterance ends: within the 5 s collar
     # it is scored semantically, outside a 1 s collar it costs 1.
     hyp = REF + [seg("S1", "B", 7.0, 7.0, "really")]
@@ -71,21 +87,21 @@ def test_insertion_within_collar_joins_utterance():
     assert len(b) == 1 and b[0].hypothesis == "i am fine thank you really"
 
 
-def test_missing_session_is_all_deletions():
+def test_missing_session_is_all_deletions(score):
     ref = REF + [seg("S2", "A", 0.0, 1.0, "a b c")]
     res = score(ref, REF)
     assert res["S2"].errors == 3 and res["S2"].length == 3
     assert combine(res).length == 20
 
 
-def test_segments_sum_to_errors():
+def test_segments_sum_to_errors(score):
     hyp = [REF[0], seg("S1", "B", 2.5, 4.0, "i am fine thanks")]
     r = score(REF, hyp, return_segments=True)["S1"]
     assert sum(s.errors for s in r.segments) == pytest.approx(r.errors)
     assert sum(s.reference_words for s in r.segments) == r.length
 
 
-def test_gap_splits_utterances():
+def test_gap_splits_utterances(score):
     hyp = [{**s, "speaker": "x" if s["speaker"] == "A" else "y"} for s in REF]
     r = score(REF, hyp, return_segments=True)["S1"]
     assert len([s for s in r.segments if s.speaker == "A"]) == 2

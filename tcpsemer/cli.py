@@ -28,6 +28,8 @@ def main(argv=None):
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--max-gap", type=float, default=2.0,
                    help="Reference gap (s) that starts a new utterance (default: 2)")
+    p.add_argument("--backend", default="auto", choices=["auto", "rust", "python"],
+                   help="Alignment backend (default: Rust if available)")
     p.add_argument("--per-reco-out", default=None,
                    help="Write per-session results to this JSON file")
     p.add_argument("--segments-out", default=None,
@@ -43,7 +45,8 @@ def main(argv=None):
     res = tcpsemer(unwrap(a.reference), unwrap(a.hypothesis), collar=a.collar,
                    regex=a.regex, uem=unwrap(a.uem), normalizer=a.normalizer,
                    model=a.model, device=a.device, batch_size=a.batch_size,
-                   max_gap=a.max_gap, return_segments=a.segments_out is not None)
+                   max_gap=a.max_gap, return_segments=a.segments_out is not None,
+                   backend=a.backend)
     total = combine(res)
 
     row = lambda r: {"error_rate": r.error_rate, "errors": r.errors, "length": r.length}

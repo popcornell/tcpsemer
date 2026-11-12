@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=64"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
 
 [project]
 name = "tcpsemer"
@@ -16,10 +16,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest"]
+test = ["pytest", "scipy"]
 
 [project.scripts]
 tcpsemer = "tcpsemer.cli:main"
 
-[tool.setuptools]
-packages = ["tcpsemer"]
+[tool.maturin]
+module-name = "tcpsemer._rust"
+features = ["extension-module"]
+python-source = "."
+python-packages = ["tcpsemer"]
+include = [{ path = "tcpsemer/**/*.py", format = "sdist" }]
