@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Time-constrained minimum-permutation semantic error rate (tcpSemER) for multi-speaker ASR"
 readme = "README.md"
 requires-python = ">=3.9"
+license = { file = "LICENSE" }
 dependencies = [
     "meeteval>=0.4",
     "simplejson",
