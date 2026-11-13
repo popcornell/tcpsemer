@@ -137,4 +137,17 @@ normalizer=None)` is kept as an alias for code written against
 }
 ```
 
-Please also cite MeetEval, which provides the alignment and speaker assignment.
+Please also cite MeetEval. tcpSemER uses the tcpWER speaker assignment and
+time-constrained alignment as implemented in MeetEval; the Python backend
+calls MeetEval and the Rust backend is a port of its implementation.
+
+```bibtex
+@InProceedings{MeetEval23,
+  author    = {von Neumann, Thilo and Boeddeker, Christoph and Delcroix, Marc and Haeb-Umbach, Reinhold},
+  title     = {{MeetEval}: A Toolkit for Computation of Word Error Rates for Meeting Transcription Systems},
+  year      = {2023},
+  booktitle = {Proc. 7th International Workshop on Speech Processing in Everyday Environments (CHiME 2023)},
+  pages     = {27--32},
+  doi       = {10.21437/CHiME.2023-6}
+}
+```
