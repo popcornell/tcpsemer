@@ -12,7 +12,7 @@ costs less than one that changes it.
 ## Install
 
 ```bash
-pip install git+https://github.com/<org>/tcpSemER
+pip install git+https://github.com/popcornell/tcpsemer
 # or, from a clone
 pip install -e .
 ```
